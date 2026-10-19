@@ -21,6 +21,7 @@ public class MyModel extends MyModelBase {
     private Collection<Change> scopeChanges; // Scope changes only (from target branch comparison)
     private Collection<Change> localChanges; // Local changes towards HEAD only
     private Map<String, Change> changesMap; // Cached map of changes by file path
+    private Map<String, Change> treeChangesMap; // Cached map of filtered tree changes by file path
     private Map<String, Change> scopeChangesMap; // Cached map of scope changes by file path
     private Map<String, Change> localChangesMap; // Cached map of local changes by file path
     private boolean isActive;
@@ -108,6 +109,7 @@ public class MyModel extends MyModelBase {
     public void setChanges(Collection<Change> changes) {
         this.changes = changes;
         this.changesMap = buildChangesByPathMap(changes);
+        this.treeChangesMap = this.changesMap;
         notifyListeners(field.changes);
     }
 
@@ -116,8 +118,18 @@ public class MyModel extends MyModelBase {
      * Use this when the map is already computed on a background thread.
      */
     public void setChangesWithMap(Collection<Change> changes, Map<String, Change> changesMap) {
+        setChangesWithMap(changes, changesMap, buildChangesByPathMap(changes));
+    }
+
+    /**
+     * Sets changes with pre-built maps for both the unfiltered merged changes and the filtered
+     * tree changes, avoiding file system access on EDT.
+     */
+    public void setChangesWithMap(Collection<Change> changes, Map<String, Change> changesMap,
+                                  Map<String, Change> treeChangesMap) {
         this.changes = changes;
         this.changesMap = changesMap;
+        this.treeChangesMap = treeChangesMap;
         notifyListeners(field.changes);
     }
 
@@ -159,6 +171,10 @@ public class MyModel extends MyModelBase {
 
     public Map<String, Change> getChangesMap() {
         return changesMap;
+    }
+
+    public Map<String, Change> getTreeChangesMap() {
+        return treeChangesMap;
     }
 
     public Map<String, Change> getScopeChangesMap() {

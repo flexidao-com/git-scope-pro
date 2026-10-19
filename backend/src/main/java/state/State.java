@@ -10,6 +10,8 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * HOWTO:
@@ -50,6 +52,21 @@ public class State implements PersistentStateComponent<State> {
     public Boolean showUntrackedFiles;
     public Boolean showDeletedFiles;
 
+    /**
+     * Per-project "Hide Noise" toggle (Git Scope window button). Null until
+     * {@link service.ViewService} seeds it from {@link settings.GitScopeSettings}'s new-project
+     * default on first load; from then on this project's own value is authoritative.
+     */
+    public Boolean hideNoise;
+
+    /**
+     * Per-project file path to reviewed-mark hash (see implementation.noise.ReviewedChangesService).
+     * A file counts as reviewed while its current scope diff still hashes to the stored value; any
+     * real edit changes the hash and brings the file back. Concurrent because the collection thread
+     * reads it while the EDT writes it.
+     */
+    public Map<String, String> reviewedChanges = new ConcurrentHashMap<>();
+
     public List<MyModelBase> getModelData() {
         return modelData;
     }
@@ -80,6 +97,25 @@ public class State implements PersistentStateComponent<State> {
 
     public void setShowDeletedFiles(Boolean value) {
         showDeletedFiles = value;
+    }
+
+    public Boolean getHideNoise() {
+        return hideNoise;
+    }
+
+    public void setHideNoise(Boolean value) {
+        hideNoise = value;
+    }
+
+    public Map<String, String> getReviewedChanges() {
+        if (reviewedChanges == null) {
+            reviewedChanges = new ConcurrentHashMap<>();
+        }
+        return reviewedChanges;
+    }
+
+    public void setReviewedChanges(Map<String, String> reviewedChanges) {
+        this.reviewedChanges = reviewedChanges;
     }
 
     // In your State class, add these methods:

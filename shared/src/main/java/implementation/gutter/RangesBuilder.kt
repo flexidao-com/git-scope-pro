@@ -6,8 +6,12 @@ package implementation.gutter
 import com.intellij.diff.comparison.ComparisonManager
 import com.intellij.diff.comparison.ComparisonPolicy
 import com.intellij.diff.comparison.DiffTooBigException
+import com.intellij.diff.fragments.LineFragment
+import com.intellij.diff.tools.util.text.LineOffsetsUtil
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.progress.DumbProgressIndicator
+import implementation.noise.NoiseNormalizer
+import implementation.noise.NoisePolicy
 
 /**
  * Creates ranges by comparing current document with VCS base revision.
@@ -20,10 +24,22 @@ object RangesBuilder {
     }
 
     fun createRanges(current: CharSequence, vcs: CharSequence): List<Range> {
+        return createRanges(current, vcs, null, null)
+    }
+
+    /**
+     * Like [createRanges], but with [normalizer] and [filePath] non-null (Hide Noise on) both sides
+     * are normalised keeping their lines, so an import-only difference becomes a whitespace-only
+     * one. A fragment whose normalised sides are equal under [NoisePolicy.comparisonPolicyFor]
+     * (whitespace-ignoring, except for indentation-sensitive files) is dropped, so it produces no
+     * marker (mirrors `NoiseDiffComputer`). The line counts must be
+     * preserved by the rules; otherwise the diff falls back to the raw texts, because the
+     * normalised line numbers would no longer map to the document.
+     */
+    fun createRanges(current: CharSequence, vcs: CharSequence,
+                     normalizer: NoiseNormalizer?, filePath: String?): List<Range> {
         return try {
-            val fragments = ComparisonManager.getInstance().compareLines(
-                vcs, current, ComparisonPolicy.DEFAULT, DumbProgressIndicator.INSTANCE
-            )
+            val fragments = compareLineFragments(vcs, current, normalizer, filePath)
             fragments.map { fragment ->
                 Range(
                     line1 = fragment.startLine2,
@@ -34,6 +50,37 @@ object RangesBuilder {
             }
         } catch (e: DiffTooBigException) {
             emptyList()
+        }
+    }
+
+    private fun compareLineFragments(vcs: CharSequence, current: CharSequence,
+                                     normalizer: NoiseNormalizer?, filePath: String?): List<LineFragment> {
+        val comparisonManager = ComparisonManager.getInstance()
+        if (normalizer == null || filePath == null) {
+            return comparisonManager.compareLines(vcs, current, ComparisonPolicy.DEFAULT, DumbProgressIndicator.INSTANCE)
+        }
+
+        val normalizedVcs = normalizer.normalizeKeepingLines(filePath, vcs)
+        val normalizedCurrent = normalizer.normalizeKeepingLines(filePath, current)
+        val lineCountsPreserved =
+            LineOffsetsUtil.create(normalizedVcs).lineCount == LineOffsetsUtil.create(vcs).lineCount &&
+                    LineOffsetsUtil.create(normalizedCurrent).lineCount == LineOffsetsUtil.create(current).lineCount
+        if (!lineCountsPreserved) {
+            /* A user rule added or removed lines: normalised line numbers no longer match the
+             * document, so diff the raw texts. */
+            return comparisonManager.compareLines(vcs, current, ComparisonPolicy.DEFAULT, DumbProgressIndicator.INSTANCE)
+        }
+
+        val noisePolicy = NoisePolicy.comparisonPolicyFor(filePath)
+        val fragments = comparisonManager.compareLines(
+            normalizedVcs, normalizedCurrent, ComparisonPolicy.DEFAULT, DumbProgressIndicator.INSTANCE
+        )
+        return fragments.filterNot { fragment ->
+            comparisonManager.isEquals(
+                normalizedVcs.subSequence(fragment.startOffset1, fragment.endOffset1),
+                normalizedCurrent.subSequence(fragment.startOffset2, fragment.endOffset2),
+                noisePolicy
+            )
         }
     }
 }

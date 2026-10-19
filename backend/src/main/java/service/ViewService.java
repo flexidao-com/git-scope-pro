@@ -20,12 +20,16 @@ import com.intellij.ui.content.ContentManager;
 import com.intellij.util.concurrency.SequentialTaskExecutor;
 import implementation.compare.ChangesService;
 import implementation.lineStatusTracker.MyLineStatusTrackerImpl;
+import implementation.noise.ChangeNoiseClassifier;
+import implementation.noise.OpenDiffsRefresher;
+import implementation.noise.ReviewedChangesService;
 import model.Debounce;
 import model.MyModel;
 import model.MyModelBase;
 import model.TargetBranchMap;
 import org.jetbrains.annotations.NotNull;
 import settings.GitScopeSettings;
+import settings.NoiseRuleState;
 import state.State;
 import implementation.scope.MyScope;
 import system.Defs;
@@ -67,6 +71,8 @@ public class ViewService implements Disposable {
     private ToolWindowServiceInterface toolWindowService;
     private TargetBranchService targetBranchService;
     private ChangesService changesService;
+    private ChangeNoiseClassifier changeNoiseClassifier;
+    private ReviewedChangesService reviewedChangesService;
     private State state;
     private MyLineStatusTrackerImpl myLineStatusTrackerImpl;
     private Debounce debouncer;
@@ -172,6 +178,8 @@ public class ViewService implements Disposable {
     public void initDependencies() {
         this.toolWindowService = project.getService(ToolWindowServiceInterface.class);
         this.changesService = project.getService(ChangesService.class);
+        this.changeNoiseClassifier = project.getService(ChangeNoiseClassifier.class);
+        this.reviewedChangesService = project.getService(ReviewedChangesService.class);
         this.statusBarService = project.getService(StatusBarService.class);
         this.gitService = project.getService(GitService.class);
         this.targetBranchService = project.getService(TargetBranchService.class);
@@ -183,8 +191,8 @@ public class ViewService implements Disposable {
     }
 
     /**
-     * Seeds this project's untracked/deleted-file toggles (#111) from the application-level
-     * "new project" default the first time they're touched. Once seeded, a project's own stored
+     * Seeds this project's untracked/deleted-file/noise toggles from the application-level
+     * "new project" defaults the first time they're touched. Once seeded, a project's own stored
      * value is authoritative -- later changes to the Settings default no longer affect it.
      */
     private void seedWorkingTreeDefaults() {
@@ -194,6 +202,9 @@ public class ViewService implements Disposable {
         }
         if (state.getShowDeletedFiles() == null) {
             state.setShowDeletedFiles(defaults.isShowDeletedFiles());
+        }
+        if (state.getHideNoise() == null) {
+            state.setHideNoise(defaults.isHideNoise());
         }
     }
 
@@ -319,6 +330,9 @@ public class ViewService implements Disposable {
                 myModel.setCustomTabName(customTabName);
             }
 
+            // Load the tab's scope noise rules
+            myModel.setNoiseRules(myModelBase.getNoiseRules());
+
             collection.add(myModel);
         });
 
@@ -352,6 +366,9 @@ public class ViewService implements Disposable {
             if (customTabName != null && !customTabName.isEmpty()) {
                 myModelBase.setCustomTabName(customTabName);
             }
+
+            // Save the tab's scope noise rules
+            myModelBase.setNoiseRules(myModel.getNoiseRules());
 
             modelData.add(myModelBase);
         });
@@ -730,6 +747,10 @@ public class ViewService implements Disposable {
             return done;
         }
 
+        /* The classifier's normaliser depends on the tab's scope rules; install them before the
+           collection that filters with it (the single entry both tab switches and refreshes use). */
+        changeNoiseClassifier.setScopeRules(model.getNoiseRules());
+
         // Ensure HEAD tab is initialized before proceeding
         ensureHeadTabInitializedAsync(model, () -> {
             TargetBranchMap targetBranchMap = model.getTargetBranchMap();
@@ -745,6 +766,22 @@ public class ViewService implements Disposable {
         });
 
         return done;
+    }
+
+    /**
+     * Replaces the current tab's scope rules, persists them, rebuilds the normaliser and refreshes
+     * tree/diff/gutter. EDT.
+     */
+    public void updateCurrentScopeNoiseRules(@NotNull List<NoiseRuleState> rules) {
+        MyModel current = getCurrent();
+        if (current == null) {
+            return;
+        }
+        current.setNoiseRules(rules);
+        save();
+        changeNoiseClassifier.setScopeRules(current.getNoiseRules());
+        collectChanges(true);
+        OpenDiffsRefresher.rediffAll(project);
     }
 
     private void collectChangesInternal(MyModel model, TargetBranchMap targetBranchMap, boolean checkFs, CompletableFuture<Void> done) {
@@ -767,44 +804,78 @@ public class ViewService implements Disposable {
                     return;
                 }
 
-                // Build maps on background thread to avoid slow file system operations on EDT
-                Map<String, Change> mergedChangesMap = MyModel.buildChangesByPathMap(result.mergedChanges());
-                Map<String, Change> scopeChangesMap = MyModel.buildChangesByPathMap(result.scopeChanges());
-                Map<String, Change> localChangesMap = MyModel.buildChangesByPathMap(result.localChanges());
+                /* The callback arrives on the EDT. Map building touches the file system and the
+                   noise filter loads revision contents from git, so both run on a pooled thread
+                   before the EDT apply below. */
+                ApplicationManager.getApplication().executeOnPooledThread(() -> {
+                    Collection<Change> mergedChanges = result.mergedChanges();
+                    Map<String, Change> mergedChangesMap = MyModel.buildChangesByPathMap(mergedChanges);
+                    Map<String, Change> scopeChangesMap = MyModel.buildChangesByPathMap(result.scopeChanges());
+                    Map<String, Change> localChangesMap = MyModel.buildChangesByPathMap(result.localChanges());
 
-                ApplicationManager.getApplication().invokeLater(() -> {
-                    try {
-                        long currentGen = applyGeneration.get();
-                        if (!project.isDisposed() && !token.disposed && currentGen == gen) {
-                            LOG.debug("Applying changes for generation " + gen);
-                            Map<String, Change> previousScopeMap = model.getScopeChangesMap();
-                            model.setChangesWithMap(result.mergedChanges(), mergedChangesMap);
-                            model.setScopeChangesWithMap(result.scopeChanges(), scopeChangesMap);
-                            model.setLocalChangesWithMap(result.localChanges(), localChangesMap);
+                    /* Hide Noise filters only what the tree displays: the maps above and the scope/local
+                       collections keep every change, so file colours and gutter markers still show it.
+                       Files marked as reviewed whose diff has not changed since marking are hidden the
+                       same way. */
+                    Collection<Change> treeChanges = filterHiddenChanges(mergedChanges);
+                    Map<String, Change> treeChangesMap = MyModel.buildChangesByPathMap(treeChanges);
 
-                            /* GitScopeFileStatusProvider answers from the scope map, but the
-                               platform caches its answers until fileStatusesChanged() -- which
-                               previously only tab switches triggered, so Project-view colors kept
-                               showing the pre-collection scope (e.g. conflict-era statuses after a
-                               rebase). Refresh when the statuses materially changed; the guard
-                               avoids the LST-disturbing refresh on the common no-change apply. */
-                            if (model.isActive() && !sameScopeStatuses(previousScopeMap, scopeChangesMap)) {
-                                LOG.debug("Scope statuses changed for generation " + gen + ", refreshing file colors");
-                                refreshFileColors();
+                    ApplicationManager.getApplication().invokeLater(() -> {
+                        try {
+                            long currentGen = applyGeneration.get();
+                            if (!project.isDisposed() && !token.disposed && currentGen == gen) {
+                                LOG.debug("Applying changes for generation " + gen);
+                                Map<String, Change> previousScopeMap = model.getScopeChangesMap();
+                                model.setChangesWithMap(treeChanges, mergedChangesMap, treeChangesMap);
+                                model.setScopeChangesWithMap(result.scopeChanges(), scopeChangesMap);
+                                model.setLocalChangesWithMap(result.localChanges(), localChangesMap);
+
+                                /* GitScopeFileStatusProvider answers from the scope map, but the
+                                   platform caches its answers until fileStatusesChanged() -- which
+                                   previously only tab switches triggered, so Project-view colors kept
+                                   showing the pre-collection scope (e.g. conflict-era statuses after a
+                                   rebase). Refresh when the statuses materially changed; the guard
+                                   avoids the LST-disturbing refresh on the common no-change apply. */
+                                if (model.isActive() && !sameScopeStatuses(previousScopeMap, scopeChangesMap)) {
+                                    LOG.debug("Scope statuses changed for generation " + gen + ", refreshing file colors");
+                                    refreshFileColors();
+                                }
+
+                                /* Repositories are resolvable by now, so tab tooltips that could not be
+                                   built at boot (empty branch name) can finally be published. */
+                                project.getService(TabActionService.class).publishRenamedTabs();
+                            } else {
+                                LOG.debug("Discarding changes for generation " + gen + " (current generation is " + currentGen + ")");
                             }
-
-                            /* Repositories are resolvable by now, so tab tooltips that could not be
-                               built at boot (empty branch name) can finally be published. */
-                            project.getService(TabActionService.class).publishRenamedTabs();
-                        } else {
-                            LOG.debug("Discarding changes for generation " + gen + " (current generation is " + currentGen + ")");
+                        } finally {
+                            done.complete(null);
                         }
-                    } finally {
-                        done.complete(null);
-                    }
-                }, ModalityState.any(), __ -> token.disposed);
+                    }, ModalityState.any(), __ -> token.disposed);
+                });
             }, checkFs);
         });
+    }
+
+    /**
+     * Applies Hide Noise and the reviewed marks to the list the tree displays. The ERROR_STATE
+     * sentinel bypasses filtering (VcsTree recognises it by type to render the error view), and a
+     * failing filter falls back to every change: hiding is a display concern, never a reason to
+     * blank the scope.
+     */
+    private @NotNull Collection<Change> filterHiddenChanges(@NotNull Collection<Change> mergedChanges) {
+        boolean hideNoise = Boolean.TRUE.equals(state.getHideNoise());
+        boolean isErrorState = mergedChanges instanceof ChangesService.ErrorStateMarker;
+        if (!hideNoise || isErrorState) {
+            return mergedChanges;
+        }
+        try {
+            return reviewedChangesService.withoutReviewed(changeNoiseClassifier.withoutNoise(mergedChanges));
+        } catch (com.intellij.openapi.progress.ProcessCanceledException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            LOG.warn("Hide Noise: filter failed, showing all changes", e);
+            return mergedChanges;
+        }
     }
 
     /**
@@ -937,6 +1008,30 @@ public class ViewService implements Disposable {
      */
     public Map<String, Change> getCurrentScopeChangesMap() {
         return getChangesMapInternal(MyModel::getChangesMap);
+    }
+
+    /**
+     * Gets the filtered collection of changes displayed in the Git Scope tree (merged changes
+     * after Hide Noise and reviewed-file filtering).
+     *
+     * @return Collection of tree changes, or null if not initialized
+     */
+    public Collection<Change> getTreeChanges() {
+        if (toolWindowService == null) {
+            return null;
+        }
+        MyModel current = getCurrent();
+        return current == null ? null : current.getChanges();
+    }
+
+    /**
+     * Gets a HashMap of the filtered tree changes indexed by file path for O(1) lookup.
+     * Returns the cached map that was built when changes were set.
+     *
+     * @return Map of file path to Change, or null if not initialized
+     */
+    public Map<String, Change> getTreeChangesMap() {
+        return getChangesMapInternal(MyModel::getTreeChangesMap);
     }
 
     public void removeTab(int tabIndex) {
@@ -1173,7 +1268,11 @@ public class ViewService implements Disposable {
             // Determine which changes to show in gutter based on IDE's VCS gutter setting
             Map<String, Change> gutterChangesMap = getGutterChangesMap();
             Map<String, Change> localChangesMap = getLocalChangesTowardsHeadMap();
-            myLineStatusTrackerImpl.update(gutterChangesMap, localChangesMap);
+            MyModel current = getCurrent();
+            myLineStatusTrackerImpl.update(gutterChangesMap, localChangesMap,
+                    current != null ? current.getNoiseRules() : List.of());
+            /* Intentional: the "Git Scope" named scope mirrors the filtered tree, so Find in Files
+               and inspections also skip hidden noise/reviewed files. */
             myScope.update(changes);
 
             // Perform scroll restoration after all UI updates are complete

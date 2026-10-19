@@ -14,6 +14,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import service.GutterDataService
 import settings.GitScopeSettings
+import settings.NoiseRuleState
 import system.Defs
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -78,7 +79,9 @@ class FrontendGutterSubscriptions(
             is GutterUpdateEvent.DataUpdated -> {
                 val dto = event.data
                 gds.scopeDisplayName = dto.scopeDisplayName
-                GitScopeSettings.getInstance().isSeparateGutterRendering = dto.separateGutterRendering
+                val settings = GitScopeSettings.getInstance()
+                settings.isSeparateGutterRendering = dto.separateGutterRendering
+                syncNoiseRules(settings, dto)
 
                 /* Contents are omitted when unchanged since the backend's last message for this
                    file; the previously published data then carries them. */
@@ -107,12 +110,39 @@ class FrontendGutterSubscriptions(
                     dto.ranges.map { Range(it.line1, it.line2, it.vcsLine1, it.vcsLine2) },
                     baseContent,
                     headContent,
-                    dto.scopeRanges?.map { Range(it.line1, it.line2, it.vcsLine1, it.vcsLine2) }
+                    dto.scopeRanges?.map { Range(it.line1, it.line2, it.vcsLine1, it.vcsLine2) },
+                    null,
+                    dto.hideNoise,
+                    dto.scopeNoiseRules.map {
+                        NoiseRuleState(it.enabled, it.name, it.fileGlob, it.pattern, it.replacement, it.literal)
+                    }
                 )
                 gds.publish(dto.filePath, data)
             }
             is GutterUpdateEvent.DataCleared -> gds.clear(event.filePath)
             is GutterUpdateEvent.AllCleared -> gds.clearAll()
+        }
+    }
+
+    /**
+     * Keeps the frontend's settings copy in step with the backend's global noise configuration.
+     * The gutter DTO carries it (split mode), so a rules edit takes effect without waiting for the
+     * platform's settings synchronisation. Writes only on a real difference: each setter bumps
+     * getNoiseRulesVersion(), and a bump per event would rebuild the normaliser repeatedly.
+     * <p>
+     * Only the global configuration is synced here. The tab's scope rules travel in their own DTO
+     * field: in monolith mode this settings instance is the user's, so merging scope rules into it
+     * would overwrite the global rules.
+     */
+    private fun syncNoiseRules(settings: GitScopeSettings, dto: GutterFileDataDto) {
+        if (settings.isBuiltInNoiseRulesEnabled != dto.builtInNoiseRulesEnabled) {
+            settings.isBuiltInNoiseRulesEnabled = dto.builtInNoiseRulesEnabled
+        }
+        val rules = dto.noiseRules.map {
+            NoiseRuleState(it.enabled, it.name, it.fileGlob, it.pattern, it.replacement, it.literal)
+        }
+        if (settings.noiseRules != rules) {
+            settings.noiseRules = rules
         }
     }
 }

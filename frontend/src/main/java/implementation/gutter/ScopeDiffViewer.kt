@@ -6,11 +6,14 @@ package implementation.gutter
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
 import com.intellij.diff.requests.SimpleDiffRequest
+import com.intellij.diff.util.DiffUserDataKeysEx
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.ex.EditorEx
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import implementation.noise.NoiseDiffComputer
+import settings.NoiseRuleState
 import system.Defs
 
 /**
@@ -28,12 +31,29 @@ class ScopeDiffViewer(
     @Volatile
     private var vcsBaseContent: String? = null
 
+    @Volatile
+    private var hideNoise: Boolean = false
+
+    /** The active tab's scope rules; empty when the tab defines none. */
+    @Volatile
+    private var scopeNoiseRules: List<NoiseRuleState> = emptyList()
+
     /**
      * Updates the base content from VCS.
      * Must be called before showing diffs.
      */
     fun setVcsBaseContent(baseContent: String?) {
         vcsBaseContent = baseContent
+    }
+
+    /** Updates whether Hide Noise is on, so the shown diff skips noise-only changes. */
+    fun setHideNoise(value: Boolean) {
+        hideNoise = value
+    }
+
+    /** Updates the active tab's scope rules, applied in addition to the global ones. */
+    fun setScopeNoiseRules(rules: List<NoiseRuleState>) {
+        scopeNoiseRules = rules
     }
 
     /**
@@ -60,6 +80,15 @@ class ScopeDiffViewer(
                 "Base (Scope)",
                 "Current"
             )
+
+            /* Hide Noise: the computer drops noise-only fragments from this range's diff,
+             * exactly like the diffs opened from the tool window. */
+            if (hideNoise) {
+                request.putUserData(
+                    DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER,
+                    NoiseDiffComputer({ NoiseNormalizerCache.get(scopeNoiseRules) }, file.path)
+                )
+            }
 
             // Show diff in a dialog
             DiffManager.getInstance().showDiff(project, request)

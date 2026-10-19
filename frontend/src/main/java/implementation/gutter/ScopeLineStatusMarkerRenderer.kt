@@ -255,6 +255,22 @@ class ScopeLineStatusMarkerRenderer(
     }
 
     /**
+     * Updates whether Hide Noise is on, so the popup diff can attach the noise diff computer.
+     * Travelled here with the gutter data, like [setVcsBaseContent].
+     */
+    fun setHideNoise(hideNoise: Boolean) {
+        diffViewer.setHideNoise(hideNoise)
+    }
+
+    /**
+     * Updates the active tab's scope noise rules, which the popup diff adds to the global rules.
+     * Travelled here with the gutter data, like [setHideNoise].
+     */
+    fun setScopeNoiseRules(scopeNoiseRules: List<settings.NoiseRuleState>) {
+        diffViewer.setScopeNoiseRules(scopeNoiseRules)
+    }
+
+    /**
      * Updates the ranges to be painted in the gutter.
      * Must be called on EDT.
      */

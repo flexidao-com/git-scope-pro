@@ -3,12 +3,17 @@ package toolwindow;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.*;
 import com.intellij.openapi.fileEditor.FileEditorManager;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.Task;
+import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.vcs.VcsDataKeys;
 import com.intellij.openapi.vcs.changes.Change;
 import com.intellij.openapi.vcs.changes.actions.CreatePatchFromChangesAction;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ide.projectView.ProjectView;
+import implementation.noise.ReviewedChangesService;
 import model.MyModel;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -107,6 +112,137 @@ public class VcsTreeActions {
         }
     }
 
+    public static class MarkReviewedAction extends AnAction {
+        public MarkReviewedAction() {
+            super("Mark as Reviewed",
+                    "Hide this file while Hide Noise is on, until its changes differ from now",
+                    AllIcons.Actions.Checked);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
+
+        @Override
+        public void actionPerformed(@NotNull AnActionEvent e) {
+            Project project = e.getData(CommonDataKeys.PROJECT);
+            Change[] changes = e.getData(VcsDataKeys.CHANGES);
+            if (project == null || changes == null || changes.length == 0) return;
+
+            List<Change> selection = Arrays.asList(changes);
+            new Task.Backgroundable(project, "Marking as Reviewed", false) {
+                @Override
+                public void run(@NotNull ProgressIndicator indicator) {
+                    project.getService(ReviewedChangesService.class).markReviewed(selection);
+                }
+
+                @Override
+                public void onSuccess() {
+                    refreshChanges(project);
+                }
+            }.queue();
+        }
+
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            e.getPresentation().setEnabled(hasUnmarkedChange(e));
+        }
+
+        /** Whether at least one selected change has no mark yet; cheap, no content is loaded. */
+        private static boolean hasUnmarkedChange(@NotNull AnActionEvent e) {
+            Project project = e.getData(CommonDataKeys.PROJECT);
+            Change[] changes = e.getData(VcsDataKeys.CHANGES);
+            if (project == null || changes == null || changes.length == 0) return false;
+            ReviewedChangesService service = project.getService(ReviewedChangesService.class);
+            for (Change change : changes) {
+                if (!service.hasMark(change)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    public static class UnmarkReviewedAction extends AnAction {
+        public UnmarkReviewedAction() {
+            super("Unmark Reviewed", "Show this file again even while Hide Noise is on",
+                    AllIcons.Actions.Unselectall);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
+
+        @Override
+        public void actionPerformed(@NotNull AnActionEvent e) {
+            Project project = e.getData(CommonDataKeys.PROJECT);
+            Change[] changes = e.getData(VcsDataKeys.CHANGES);
+            if (project == null || changes == null || changes.length == 0) return;
+            project.getService(ReviewedChangesService.class).unmarkReviewed(Arrays.asList(changes));
+            refreshChanges(project);
+        }
+
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            e.getPresentation().setEnabled(hasMarkedChange(e));
+        }
+
+        /** Whether at least one selected change has a mark; cheap, no content is loaded. */
+        private static boolean hasMarkedChange(@NotNull AnActionEvent e) {
+            Project project = e.getData(CommonDataKeys.PROJECT);
+            Change[] changes = e.getData(VcsDataKeys.CHANGES);
+            if (project == null || changes == null || changes.length == 0) return false;
+            ReviewedChangesService service = project.getService(ReviewedChangesService.class);
+            for (Change change : changes) {
+                if (service.hasMark(change)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    public static class ClearReviewedMarksAction extends AnAction {
+        private static final String BASE_TEXT = "Clear All Reviewed Marks";
+
+        public ClearReviewedMarksAction() {
+            super(BASE_TEXT, "Remove every reviewed mark in this project", null);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
+
+        @Override
+        public void actionPerformed(@NotNull AnActionEvent e) {
+            Project project = e.getData(CommonDataKeys.PROJECT);
+            if (project == null) return;
+            ReviewedChangesService service = project.getService(ReviewedChangesService.class);
+            int count = service.markCount();
+            if (count == 0) return;
+
+            int answer = Messages.showYesNoDialog(project,
+                    "Clear all " + count + " reviewed marks?",
+                    BASE_TEXT,
+                    Messages.getQuestionIcon());
+            if (answer != Messages.YES) return;
+
+            service.clearAllMarks();
+            refreshChanges(project);
+        }
+
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            Project project = e.getData(CommonDataKeys.PROJECT);
+            int count = project == null ? 0 : project.getService(ReviewedChangesService.class).markCount();
+            e.getPresentation().setText(BASE_TEXT + " (" + count + ")");
+            e.getPresentation().setEnabled(count > 0);
+        }
+    }
+
     public static class CreatePatchAction extends AnAction {
         public CreatePatchAction() {
             super("Create Patch...", "Create a patch file from selected changes", AllIcons.Vcs.Patch);
@@ -183,7 +319,7 @@ public class VcsTreeActions {
         }
     }
 
-    /** Presentation toggles (untracked/deleted files, "Group By") right-align via {@link RightAlignedToolbarAction},
+    /** Presentation toggles (untracked/deleted files, noise, "Group By") right-align via {@link RightAlignedToolbarAction},
      * away from the action icons (rollback, create patch, ...) on the left. */
     public static class ShowUntrackedFilesAction extends ToggleAction implements RightAlignedToolbarAction {
         public ShowUntrackedFilesAction() {
@@ -234,6 +370,69 @@ public class VcsTreeActions {
             if (project == null) return;
             project.getService(State.class).setShowDeletedFiles(state);
             refreshChanges(project);
+        }
+    }
+
+    public static class HideNoiseAction extends ToggleAction implements RightAlignedToolbarAction {
+        public HideNoiseAction() {
+            super("Hide Noise", "Hide files whose only changes are imports or whitespace, and files marked as reviewed", AllIcons.General.Filter);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
+
+        @Override
+        public boolean isSelected(@NotNull AnActionEvent e) {
+            Project project = e.getProject();
+            if (project == null) return false;
+            return Boolean.TRUE.equals(project.getService(State.class).getHideNoise());
+        }
+
+        @Override
+        public void setSelected(@NotNull AnActionEvent e, boolean state) {
+            Project project = e.getProject();
+            if (project == null) return;
+            project.getService(State.class).setHideNoise(state);
+            refreshChanges(project);
+        }
+    }
+
+    /**
+     * Opens the per-scope noise rules editor. It is an action rather than a toggle, but changes
+     * how the list is presented, so it right-aligns with the toggles above. The presentation text
+     * carries the number of rules of the current scope, and the action is disabled on tabs
+     * without a model (the "+" tab).
+     */
+    public static class ScopeNoiseRulesAction extends DumbAwareAction implements RightAlignedToolbarAction {
+        private static final String BASE_TEXT = "Scope Noise Rules…";
+
+        public ScopeNoiseRulesAction() {
+            super(BASE_TEXT, "Replacement rules that apply only to this scope before comparing",
+                AllIcons.Actions.Properties);
+        }
+
+        @Override
+        public @NotNull ActionUpdateThread getActionUpdateThread() {
+            return ActionUpdateThread.EDT;
+        }
+
+        @Override
+        public void actionPerformed(@NotNull AnActionEvent e) {
+            Project project = e.getData(CommonDataKeys.PROJECT);
+            if (project == null) return;
+            new ScopeNoiseRulesDialog(project).show();
+        }
+
+        @Override
+        public void update(@NotNull AnActionEvent e) {
+            Project project = e.getData(CommonDataKeys.PROJECT);
+            ViewService viewService = project == null ? null : project.getService(ViewService.class);
+            MyModel current = viewService == null ? null : viewService.getCurrent();
+            int ruleCount = current == null ? 0 : current.getNoiseRules().size();
+            e.getPresentation().setText(ruleCount > 0 ? BASE_TEXT + " (" + ruleCount + ")" : BASE_TEXT);
+            e.getPresentation().setEnabled(current != null);
         }
     }
 

@@ -19,11 +19,14 @@ import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vcs.VcsApplicationSettings;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.messages.MessageBusConnection;
+import implementation.gutter.NoiseNormalizerCache;
 import implementation.gutter.Range;
 import implementation.gutter.RangesBuilder;
 import implementation.gutter.ScopeLineStatusMarkerRenderer;
+import implementation.noise.NoiseNormalizer;
 import org.jetbrains.annotations.NotNull;
 import service.GutterDataService;
+import settings.NoiseRuleState;
 import system.Defs;
 
 import java.util.*;
@@ -47,9 +50,12 @@ public class GutterRenderingService implements Disposable, GutterDataService.Lis
 
     private static final class RendererInfo {
         volatile ScopeLineStatusMarkerRenderer renderer;
+        volatile String filePath;
         volatile String baseContent;
         volatile String headContent;
         volatile List<Range> scopeRanges;
+        volatile boolean hideNoise;
+        volatile List<NoiseRuleState> scopeNoiseRules = Collections.emptyList();
         volatile DocumentListener documentListener;
 
         RendererInfo(ScopeLineStatusMarkerRenderer renderer, String baseContent) {
@@ -178,7 +184,12 @@ public class GutterRenderingService implements Disposable, GutterDataService.Lis
 
         info.headContent = data.headContent;
         info.scopeRanges = data.scopeRanges;
+        info.filePath = file.getPath();
+        info.hideNoise = data.hideNoise;
+        info.scopeNoiseRules = data.scopeNoiseRules;
         info.renderer.setVcsBaseContent(data.baseContent);
+        info.renderer.setHideNoise(data.hideNoise);
+        info.renderer.setScopeNoiseRules(data.scopeNoiseRules);
         info.renderer.updateRanges(data.ranges);
         if (LOG.isDebugEnabled()) {
             LOG.debug("GutterRenderingService.updateRenderer: applied " + data.ranges.size() + " ranges to " + file.getPath());
@@ -217,6 +228,8 @@ public class GutterRenderingService implements Disposable, GutterDataService.Lis
 
             List<Range> filteredRanges;
             if (info.headContent != null && info.scopeRanges != null) {
+                /* Raw comparison: local ranges only map HEAD positions onto the current document,
+                 * so every line shift must be present even when the change itself is noise. */
                 List<Range> localRanges = RangesBuilder.INSTANCE.createRanges(normalizedCurrent, info.headContent);
                 if (localRanges.isEmpty()) {
                     filteredRanges = new ArrayList<>(info.scopeRanges);
@@ -224,7 +237,9 @@ public class GutterRenderingService implements Disposable, GutterDataService.Lis
                     filteredRanges = mapScopeRangesToCurrentSpace(info.scopeRanges, localRanges);
                 }
             } else {
-                filteredRanges = RangesBuilder.INSTANCE.createRanges(normalizedCurrent, info.baseContent);
+                NoiseNormalizer normalizer = info.hideNoise ? NoiseNormalizerCache.get(info.scopeNoiseRules) : null;
+                filteredRanges = RangesBuilder.INSTANCE.createRanges(
+                        normalizedCurrent, info.baseContent, normalizer, info.filePath);
             }
 
             final List<Range> rangesToApply = filteredRanges;

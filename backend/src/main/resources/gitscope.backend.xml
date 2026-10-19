@@ -49,6 +49,8 @@
         <projectService serviceImplementation="service.TargetBranchService"/>
         <projectService serviceImplementation="rpc.UtilCommandService"/>
         <projectService serviceImplementation="implementation.compare.ChangesService"/>
+        <projectService serviceImplementation="implementation.noise.ChangeNoiseClassifier"/>
+        <projectService serviceImplementation="implementation.noise.ReviewedChangesService"/>
         <projectService
                 serviceInterface="service.ToolWindowServiceInterface"
                 serviceImplementation="service.ToolWindowService"/>

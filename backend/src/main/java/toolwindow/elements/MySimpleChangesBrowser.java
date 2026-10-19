@@ -21,6 +21,7 @@ import com.intellij.openapi.vcs.changes.ContentRevision;
 import com.intellij.openapi.vcs.changes.Change;
 import com.intellij.openapi.vcs.changes.CurrentContentRevision;
 import service.ViewService;
+import settings.GitScopeSettings;
 import com.intellij.openapi.vcs.changes.actions.diff.ChangeDiffRequestProducer;
 import com.intellij.openapi.vcs.changes.ui.ChangeDiffRequestChain;
 import com.intellij.openapi.vcs.changes.ui.ChangesTree;
@@ -48,10 +49,15 @@ public class MySimpleChangesBrowser extends SimpleAsyncChangesBrowser {
     private AnAction groupByAction;
     private AnAction showUntrackedFilesAction;
     private AnAction showDeletedFilesAction;
+    private AnAction hideNoiseAction;
+    private AnAction scopeNoiseRulesAction;
     private AnAction showInProjectAction;
     private AnAction rollbackAction;
     private AnAction createPatchAction;
     private AnAction copyAsPatchAction;
+    private AnAction markReviewedAction;
+    private AnAction unmarkReviewedAction;
+    private AnAction clearReviewedMarksAction;
 
     private void initializeActions() {
         if (selectOpenedFileAction == null) {
@@ -60,10 +66,15 @@ public class MySimpleChangesBrowser extends SimpleAsyncChangesBrowser {
                     (ActionGroup) ActionManager.getInstance().getAction(ChangesTree.GROUP_BY_ACTION_GROUP));
             showUntrackedFilesAction = new VcsTreeActions.ShowUntrackedFilesAction();
             showDeletedFilesAction = new VcsTreeActions.ShowDeletedFilesAction();
+            hideNoiseAction = new VcsTreeActions.HideNoiseAction();
+            scopeNoiseRulesAction = new VcsTreeActions.ScopeNoiseRulesAction();
             showInProjectAction = new VcsTreeActions.ShowInProjectAction();
             rollbackAction = new VcsTreeActions.RollbackAction();
             createPatchAction = new VcsTreeActions.CreatePatchAction();
             copyAsPatchAction = new VcsTreeActions.CopyAsPatchAction();
+            markReviewedAction = new VcsTreeActions.MarkReviewedAction();
+            unmarkReviewedAction = new VcsTreeActions.UnmarkReviewedAction();
+            clearReviewedMarksAction = new VcsTreeActions.ClearReviewedMarksAction();
         }
     }
 
@@ -90,6 +101,10 @@ public class MySimpleChangesBrowser extends SimpleAsyncChangesBrowser {
         actions.add(createPatchAction);
         actions.add(copyAsPatchAction);
         actions.add(rollbackAction);
+        actions.add(Separator.getInstance());
+        actions.add(markReviewedAction);
+        actions.add(unmarkReviewedAction);
+        actions.add(clearReviewedMarksAction);
         return actions;
     }
 
@@ -100,11 +115,13 @@ public class MySimpleChangesBrowser extends SimpleAsyncChangesBrowser {
         List<AnAction> actions = new ArrayList<>(super.createToolbarActions());
         actions.add(selectOpenedFileAction);
         actions.add(Separator.getInstance());
-        // Right: presentation-changing toggles, right-aligned (see VcsTreeActions.RightAlignedGroup
+        // Right: presentation-changing toggles and rules, right-aligned (see VcsTreeActions.RightAlignedGroup
         // / RightAlignedToolbarAction) so they sit apart from the action icons above.
         actions.add(groupByAction);
         actions.add(showDeletedFilesAction);
         actions.add(showUntrackedFilesAction);
+        actions.add(hideNoiseAction);
+        actions.add(scopeNoiseRulesAction);
         return actions;
     }
 
@@ -302,22 +319,41 @@ public class MySimpleChangesBrowser extends SimpleAsyncChangesBrowser {
         }
 
         if (change != null) {
-            // File/change leaf: open in a regular (permanent) tab.
             VirtualFile file = change.getVirtualFile();
+
+            /*
+             * PDF, DOCX and friends have no FileEditorProvider, so openFile() returns an empty
+             * composite and the double-click appears to do nothing (issue #106). Hand these to
+             * the frontend, which launches them the way Project View does. Only here, not in
+             * FileOpener: single-click preview and prev/next change navigation traverse files
+             * too, and must not spawn external applications while doing so. Checked before the
+             * "opens diff" setting so these file types still open in the associated application.
+             */
+            if (file != null && file.getFileType() instanceof INativeFileType) {
+                myProject.getService(rpc.UtilCommandService.class)
+                        .openInAssociatedApplication(file.getPath(), file.getName());
+                LOG.debug("Double-click: routed to associated application: " + file.getName());
+                return;
+            }
+
+            /*
+             * When the application setting is on, a file node opens its scope diff instead of the
+             * file (the platform's default double-click behavior for this browser, suppressed until
+             * now). showDiff() builds the chain through getDiffRequestProducer() below
+             * (scope-decorated left side, working-tree right side) and shows the whole selection,
+             * exactly like the right-click "Show Diff" action. canShowDiff() is the gate the
+             * platform's own onDoubleClick() uses.
+             */
+            boolean opensDiffOnDoubleClick = GitScopeSettings.getInstance().isDoubleClickOpensDiff()
+                    && canShowDiff();
+            if (opensDiffOnDoubleClick) {
+                showDiff();
+                LOG.debug("Double-click: opened scope diff for selected change");
+                return;
+            }
+
+            // File/change leaf: open in a regular (permanent) tab.
             if (file != null) {
-                /*
-                 * PDF, DOCX and friends have no FileEditorProvider, so openFile() returns an empty
-                 * composite and the double-click appears to do nothing (issue #106). Hand these to
-                 * the frontend, which launches them the way Project View does. Only here, not in
-                 * FileOpener: single-click preview and prev/next change navigation traverse files
-                 * too, and must not spawn external applications while doing so.
-                 */
-                if (file.getFileType() instanceof INativeFileType) {
-                    myProject.getService(rpc.UtilCommandService.class)
-                            .openInAssociatedApplication(file.getPath(), file.getName());
-                    LOG.debug("Double-click: routed to associated application: " + file.getName());
-                    return;
-                }
                 openAndScrollToChanges(myProject, file, -1, false);
                 LOG.debug("Double-click: opened in permanent tab: " + file.getName());
             }

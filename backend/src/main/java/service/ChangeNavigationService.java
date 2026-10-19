@@ -77,19 +77,18 @@ public final class ChangeNavigationService {
         ViewService viewService = project.getService(ViewService.class);
         if (viewService == null) return;
 
-        Map<String, Change> scopeChanges = viewService.getScopeChangesMap();
+        Map<String, Change> treeChanges = viewService.getTreeChangesMap();
         Map<String, Change> localChanges = viewService.getLocalChangesTowardsHeadMap();
-        if (scopeChanges == null) scopeChanges = Collections.emptyMap();
+        if (treeChanges == null) treeChanges = Collections.emptyMap();
         if (localChanges == null) localChanges = Collections.emptyMap();
-        if (scopeChanges.isEmpty() && localChanges.isEmpty()) {
-            LOG.debug("ChangeNavigation: no scope or local changes");
+        if (treeChanges.isEmpty()) {
+            LOG.debug("ChangeNavigation: no tree changes");
             return;
         }
 
-        /* Ordered list of changed files: the union of scope changes and local (working-tree vs
-         * HEAD) changes, so navigation visits every file that shows a gutter marker — both the
-         * scope markers we paint and the local markers the IDE paints. */
-        List<String> files = orderedFiles(scopeChanges, localChanges);
+        /* Ordered list of changed files from the filtered tree changes, so navigation skips files
+         * hidden by Hide Noise or marked as reviewed. */
+        List<String> files = orderedFiles(treeChanges);
         if (files.isEmpty()) {
             // Everything in the scope is deleted, a directory, or otherwise not openable.
             LOG.debug("ChangeNavigation: no navigable files in scope");
@@ -109,10 +108,10 @@ public final class ChangeNavigationService {
         }
 
         switch (direction) {
-            case NEXT_CHANGE -> navigateChange(files, scopeChanges, localChanges, fromFile, fromLine, true);
-            case PREVIOUS_CHANGE -> navigateChange(files, scopeChanges, localChanges, fromFile, fromLine, false);
-            case NEXT_FILE -> navigateFile(files, scopeChanges, localChanges, fromFile, true);
-            case PREVIOUS_FILE -> navigateFile(files, scopeChanges, localChanges, fromFile, false);
+            case NEXT_CHANGE -> navigateChange(files, treeChanges, localChanges, fromFile, fromLine, true);
+            case PREVIOUS_CHANGE -> navigateChange(files, treeChanges, localChanges, fromFile, fromLine, false);
+            case NEXT_FILE -> navigateFile(files, treeChanges, localChanges, fromFile, true);
+            case PREVIOUS_FILE -> navigateFile(files, treeChanges, localChanges, fromFile, false);
         }
     }
 
@@ -125,18 +124,18 @@ public final class ChangeNavigationService {
         ViewService viewService = project.getService(ViewService.class);
         if (viewService == null) return;
 
-        Map<String, Change> scopeChanges = viewService.getScopeChangesMap();
-        if (scopeChanges == null || scopeChanges.isEmpty()) {
-            LOG.debug("ShowDiff: no scope changes");
+        Map<String, Change> treeChanges = viewService.getTreeChangesMap();
+        if (treeChanges == null || treeChanges.isEmpty()) {
+            LOG.debug("ShowDiff: no tree changes");
             return;
         }
 
-        String targetPath = resolveDiffTarget(currentFilePath, scopeChanges);
+        String targetPath = resolveDiffTarget(currentFilePath, treeChanges);
         if (targetPath == null) {
             LOG.debug("ShowDiff: no target file");
             return;
         }
-        Change change = scopeChanges.get(targetPath);
+        Change change = treeChanges.get(targetPath);
         if (change == null) return;
 
         String scopeName = scopeDisplayName(viewService);
@@ -353,8 +352,12 @@ public final class ChangeNavigationService {
         if (currentContent == null) return new ArrayList<>(lines);
         String normalizedCurrent = StringUtil.convertLineSeparators(currentContent);
 
-        for (Range r : computeRanges(path, scopeChange, normalizedCurrent)) lines.add(r.getLine1());
-        for (Range r : computeRanges(path, localChange, normalizedCurrent)) lines.add(r.getLine1());
+        boolean hideNoise = Boolean.TRUE.equals(project.getService(state.State.class).getHideNoise());
+        implementation.noise.NoiseNormalizer normalizer = hideNoise
+                ? project.getService(implementation.noise.ChangeNoiseClassifier.class).normalizer()
+                : null;
+        for (Range r : computeRanges(path, scopeChange, normalizedCurrent, normalizer)) lines.add(r.getLine1());
+        for (Range r : computeRanges(path, localChange, normalizedCurrent, null)) lines.add(r.getLine1());
         return new ArrayList<>(lines);
     }
 
@@ -362,7 +365,8 @@ public final class ChangeNavigationService {
      * Computes change ranges (before-revision vs. current content) for a file not covered by cached
      * gutter data. Returns ranges in current-document coordinate space (line1/line2 are current-side).
      */
-    private List<Range> computeRanges(String path, @Nullable Change change, String normalizedCurrent) {
+    private List<Range> computeRanges(String path, @Nullable Change change, String normalizedCurrent,
+                                      @Nullable implementation.noise.NoiseNormalizer normalizer) {
         if (change == null || change.getBeforeRevision() == null) return Collections.emptyList();
 
         String baseContent;
@@ -376,7 +380,7 @@ public final class ChangeNavigationService {
 
         String normalizedBase = StringUtil.convertLineSeparators(baseContent);
         try {
-            return RangesBuilder.INSTANCE.createRanges(normalizedCurrent, normalizedBase);
+            return RangesBuilder.INSTANCE.createRanges(normalizedCurrent, normalizedBase, normalizer, path);
         } catch (Exception e) {
             LOG.debug("ChangeNavigation: error computing ranges for " + path, e);
             return Collections.emptyList();
@@ -396,15 +400,13 @@ public final class ChangeNavigationService {
      * navigation appear to jump around when crossing a file boundary.
      *
      * <p>Falls back to plain file-tree ordering when the tool window has not built its tree (never
-     * opened this session), and appends any changed file the tree does not show, so navigation can
-     * never silently skip a file that has gutter markers.
+     * opened this session), and appends any non-hidden changed file the tree has not rendered yet.
      *
      * <p>Entries that cannot be opened are left out — see {@link #navigable}.
      */
-    private List<String> orderedFiles(Map<String, Change> scopeChanges, Map<String, Change> localChanges) {
+    private List<String> orderedFiles(Map<String, Change> treeChanges) {
         java.util.TreeSet<String> changedFiles = new java.util.TreeSet<>(FileTreeOrder.INSTANCE);
-        changedFiles.addAll(scopeChanges.keySet());
-        changedFiles.addAll(localChanges.keySet());
+        changedFiles.addAll(treeChanges.keySet());
 
         ToolWindowServiceInterface toolWindowService = project.getService(ToolWindowServiceInterface.class);
         List<String> displayed = toolWindowService == null

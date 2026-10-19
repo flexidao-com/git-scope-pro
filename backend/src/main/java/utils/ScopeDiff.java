@@ -1,6 +1,8 @@
 package utils;
 
+import com.intellij.diff.util.DiffUserDataKeysEx;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Key;
 import com.intellij.openapi.vcs.FilePath;
 import com.intellij.openapi.vcs.VcsException;
 import com.intellij.openapi.vcs.changes.Change;
@@ -10,8 +12,13 @@ import com.intellij.openapi.vcs.changes.CurrentContentRevision;
 import com.intellij.openapi.vcs.changes.actions.diff.ChangeDiffRequestProducer;
 import com.intellij.openapi.vcs.changes.ui.ChangeDiffRequestChain;
 import com.intellij.openapi.vcs.history.VcsRevisionNumber;
+import implementation.noise.ChangeNoiseClassifier;
+import implementation.noise.NoiseDiffComputer;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import state.State;
+
+import java.util.Map;
 
 /**
  * Builds the Git Scope diff request producer for a change: base scope revision (decorated with the
@@ -39,11 +46,36 @@ public final class ScopeDiff {
         if (filePath == null || filePath.getVirtualFile() == null) {
             return null;
         }
-        Change modifiedChange = new Change(
+        Change modifiedChange = withWorkingTreeAfterSide(new Change(
                 withScopeName(change.getBeforeRevision(), scopeDisplayName),
-                new CurrentContentRevision(filePath)
+                change.getAfterRevision()
+        ));
+        boolean hideNoise = Boolean.TRUE.equals(project.getService(State.class).getHideNoise());
+        if (!hideNoise) {
+            return ChangeDiffRequestProducer.create(project, modifiedChange);
+        }
+        /* The custom computer hides noise-only fragments (imports, whitespace, user rule matches)
+         * from every viewer of this request. */
+        ChangeNoiseClassifier classifier = project.getService(ChangeNoiseClassifier.class);
+        Map<Key<?>, Object> diffContext = Map.of(
+                DiffUserDataKeysEx.CUSTOM_DIFF_COMPUTER,
+                new NoiseDiffComputer(classifier::normalizer, filePath.getPath())
         );
-        return ChangeDiffRequestProducer.create(project, modifiedChange);
+        return ChangeDiffRequestProducer.create(project, modifiedChange, diffContext);
+    }
+
+    /**
+     * Returns {@code change} with its after side replaced by the current working-tree content, so
+     * comparisons use the file as it is now (HEAD plus uncommitted edits) instead of the after
+     * revision's stored content. Returns {@code change} unchanged when there is no after file on
+     * disk (e.g. a deletion).
+     */
+    public static @NotNull Change withWorkingTreeAfterSide(@NotNull Change change) {
+        FilePath afterPath = ChangesUtil.getAfterPath(change);
+        if (afterPath == null || afterPath.getVirtualFile() == null) {
+            return change;
+        }
+        return new Change(change.getBeforeRevision(), new CurrentContentRevision(afterPath));
     }
 
     /** Decorates a revision's displayed number with the scope name, e.g. "abc1234 (master)". */

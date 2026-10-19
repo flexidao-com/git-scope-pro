@@ -123,16 +123,27 @@ class BackendGutterRpcImpl : GutterRpcApi {
         filePath: String,
         scopeDisplayName: String,
         includeContents: Boolean,
-    ) = GutterFileDataDto(
-        filePath = filePath,
-        ranges = ranges.map { GutterRangeDto(it.line1, it.line2, it.vcsLine1, it.vcsLine2) },
-        baseContent = if (includeContents) baseContent else null,
-        headContent = if (includeContents) headContent else null,
-        scopeRanges = scopeRanges?.map { GutterRangeDto(it.line1, it.line2, it.vcsLine1, it.vcsLine2) },
-        scopeDisplayName = scopeDisplayName,
-        separateGutterRendering = GitScopeSettings.getInstance().isSeparateGutterRendering,
-        contentsIncluded = includeContents
-    )
+    ): GutterFileDataDto {
+        val settings = GitScopeSettings.getInstance()
+        return GutterFileDataDto(
+            filePath = filePath,
+            ranges = ranges.map { GutterRangeDto(it.line1, it.line2, it.vcsLine1, it.vcsLine2) },
+            baseContent = if (includeContents) baseContent else null,
+            headContent = if (includeContents) headContent else null,
+            scopeRanges = scopeRanges?.map { GutterRangeDto(it.line1, it.line2, it.vcsLine1, it.vcsLine2) },
+            scopeDisplayName = scopeDisplayName,
+            separateGutterRendering = settings.isSeparateGutterRendering,
+            hideNoise = hideNoise,
+            builtInNoiseRulesEnabled = settings.isBuiltInNoiseRulesEnabled,
+            noiseRules = settings.noiseRules.map {
+                NoiseRuleDto(it.enabled, it.name ?: "", it.fileGlob ?: "", it.pattern ?: "", it.replacement ?: "", it.literal)
+            },
+            scopeNoiseRules = scopeNoiseRules.map {
+                NoiseRuleDto(it.enabled, it.name ?: "", it.fileGlob ?: "", it.pattern ?: "", it.replacement ?: "", it.literal)
+            },
+            contentsIncluded = includeContents
+        )
+    }
 }
 
 class BackendGutterRpcProvider : RemoteApiProvider {

@@ -63,8 +63,8 @@ built-in speed search — just start typing to narrow down the list.
 ![](docs/toolwindow.png)
 
 The toolbar above the change list follows one rule: action icons that operate on the current selection (**Diff**,
-**Select Opened File**) stay on the left, and icons that change how the list is presented (**Group By**, **Show
-Deleted Files**, **Show Untracked Files**) are right-aligned:
+**Select Opened File**) stay on the left, and icons that change how the list is presented or filtered (**Group By**,
+**Show Deleted Files**, **Show Untracked Files**, **Hide Noise**, **Scope Noise Rules…**) are right-aligned:
 
 ![](docs/toolbar_toggles.png)
 
@@ -72,6 +72,23 @@ Deleted Files**, **Show Untracked Files**) are right-aligned:
 (unversioned) and locally deleted files show up in the Git Scope view. The initial value for newly opened projects can
 be changed under **Settings → Tools → Git Scope** (see **Settings** below); once a project has been opened, it keeps
 its own toggle state independent of that default.
+
+**Hide Noise** is the same kind of per-project toggle — off by default — for hiding files whose only changes are
+imports or whitespace/reformatting. Hidden files keep their file colours and gutter markers, so flipping the toggle
+back brings them straight into the list again. With the toggle on, diffs opened from Git Scope also omit those
+import-only/noise changes (in place of the diff viewer's **Ignore imports and formatting** option). Files marked as
+**reviewed** from the context menu are hidden the same way, until their scope diff changes again.
+
+**Scope Noise Rules…** opens the same rules editor as the settings page, but scoped to the active tab: those rules
+apply only while that scope is selected, on top of the global rules from **Settings → Tools → Git Scope**. The common
+case needs no regex — plain text works as a pattern, so pattern `onvoice` with replacement `invoice` rewrites that
+misspelling on both sides of the comparison, and a file whose only difference was that word becomes noise and is
+hidden by **Hide Noise**. Literal rules match longest first; order only matters between regular expressions. The button
+shows the number of scope rules in parentheses.
+
+Double-clicking a file in the list normally opens it in an editor tab; enable **Double-click on a file opens its diff
+instead of the file** under **Settings → Tools → Git Scope** (see **Settings** below) to open its scope diff instead —
+the same diff as the right-click **Show Diff** action. Single-click preview is unaffected.
 
 Right click on any file will present a number of actions:
 
@@ -86,6 +103,9 @@ Right click on any file will present a number of actions:
   selected scope version of the file (s), and will in many cases leave you with a modified file that no longer show up
   in the Git Scope window since it is identical to the version pointed to by the scope. Commit the files using the
   standard Commit tool window.
+- **Mark as Reviewed**: Hides the selected file (s) while **Hide Noise** is on, until its scope diff changes again
+- **Unmark Reviewed**: Brings the selected file (s) back, even while **Hide Noise** is on
+- **Clear All Reviewed Marks (N)**: Removes every reviewed mark in the project (N is how many are set)
 
 **Create Patch...**, **Copy as Patch to Clipboard**, and **Rollback...** all apply to the current selection, so you can
 select multiple files (or all files via **Ctrl+A**) and the action will apply to all of them at once.
@@ -231,7 +251,10 @@ Plugin settings are available under **Settings → Tools → Git Scope**:
 |-------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Separate Git Scope and IDE gutter rendering** | When enabled, Git Scope gutter markers are rendered in a dedicated column to the left of the line numbers, separate from the IDE's native markers. When disabled (default), both sets of markers share the same gutter column. |
 | **Color files based on Git Scope**              | When enabled (default), file colors in the project tree and editor tabs reflect the active Git Scope status. Disable to use the IDE's default HEAD-based file coloring.                                                        |
-| **Show untracked files** / **Show deleted files** *(Working Tree)* | Initial state of the matching toggle button in the Git Scope window toolbar, applied the first time a project is opened. Already-open projects keep their own toggle state. Off by default.       |
+| **Show untracked files** / **Show deleted files** / **Hide noise** *(Working Tree)* | Initial state of the matching toggle button in the Git Scope window toolbar, applied the first time a project is opened. Already-open projects keep their own toggle state. Off by default; **Hide noise** hides files whose only changes are imports or whitespace.       |
+| **Use built-in import rules (Java, Kotlin, JS/TS, Python, Go)** *(Noise rules)* | When enabled (default), the built-in import rules normalise import statements of those languages before deciding whether a file's change is noise. Disable to apply only the custom rules below. |
+| **Noise rules** table *(Noise rules)* | Custom rules applied to both sides of a change before comparing, editable inline: **Enabled**, **Name**, **File glob**, **Pattern**, **Replacement**. Patterns are Java regular expressions (MULTILINE); matched text is replaced (the replacement may use `$1`), and a change whose sides become identical is hidden by **Hide noise**. **Export…** / **Import…** in the table toolbar save and load the rules as JSON, so they can be shared across machines. Example for a snapshot timestamp: File glob `**/*.snap`, Pattern `"updatedAt": "[^"]*"`, Replacement `"updatedAt": "X"`. |
+| **Double-click on a file opens its diff instead of the file** *(Change tree)* | When enabled, double-clicking a file node in the Git Scope change tree opens its scope diff instead of the file. Single-click preview is unaffected. Off by default. |
 
 ## Shortcuts (Added by this Plugin)
 

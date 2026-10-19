@@ -22,8 +22,12 @@ import com.intellij.util.concurrency.SequentialTaskExecutor;
 import com.intellij.util.messages.MessageBusConnection;
 import implementation.gutter.Range;
 import implementation.gutter.RangesBuilder;
+import implementation.noise.ChangeNoiseClassifier;
+import implementation.noise.NoiseNormalizer;
 import org.jetbrains.annotations.NotNull;
 import service.GutterDataService;
+import settings.NoiseRuleState;
+import state.State;
 import system.Defs;
 
 import java.util.*;
@@ -87,8 +91,12 @@ public class MyLineStatusTrackerImpl implements Disposable {
     /**
      * Updates line status data for all editors based on scope changes.
      * Computes ranges on background threads and publishes results to GutterDataService.
+     *
+     * @param scopeNoiseRules the active tab's scope rules; published with each file's data so the
+     *                        frontend's live recompute and popup diff apply them too
      */
-    public void update(Map<String, Change> scopeChangesMap, Map<String, Change> localChangesMap) {
+    public void update(Map<String, Change> scopeChangesMap, Map<String, Change> localChangesMap,
+                       @NotNull List<NoiseRuleState> scopeNoiseRules) {
         if (scopeChangesMap == null || disposing.get()) {
             LOG.debug("Gutter update skipped (scopeChangesMap=" + (scopeChangesMap == null ? "null" : "present")
                     + ", disposing=" + disposing.get() + ")");
@@ -97,6 +105,7 @@ public class MyLineStatusTrackerImpl implements Disposable {
 
         final DisposalToken token = this.disposalToken;
         final long gen = updateGeneration.incrementAndGet();
+        final List<NoiseRuleState> scopeRules = List.copyOf(scopeNoiseRules);
 
         updateExecutor.execute(() -> {
             if (token.disposed || updateGeneration.get() != gen) {
@@ -134,7 +143,7 @@ public class MyLineStatusTrackerImpl implements Disposable {
                 ApplicationManager.getApplication().executeOnPooledThread(() -> {
                     try {
                         if (!token.disposed) {
-                            UpdateInfo info = prepareUpdateForEditor(editor, scopeChangesMap, localChangesMap);
+                            UpdateInfo info = prepareUpdateForEditor(editor, scopeChangesMap, localChangesMap, scopeRules);
                             if (info != null) {
                                 updates.put(info.filePath, info);
                             }
@@ -170,20 +179,26 @@ public class MyLineStatusTrackerImpl implements Disposable {
         final List<Range> precomputedRanges;
         final List<Range> scopeRanges;
         final List<Range> localRanges;
+        final boolean hideNoise;
+        final List<NoiseRuleState> scopeNoiseRules;
 
         UpdateInfo(String filePath, String baseContent, String headContent,
-                   List<Range> ranges, List<Range> scopeRanges, List<Range> localRanges) {
+                   List<Range> ranges, List<Range> scopeRanges, List<Range> localRanges,
+                   boolean hideNoise, List<NoiseRuleState> scopeNoiseRules) {
             this.filePath = filePath;
             this.baseContent = baseContent;
             this.headContent = headContent;
             this.precomputedRanges = ranges;
             this.scopeRanges = scopeRanges;
             this.localRanges = localRanges;
+            this.hideNoise = hideNoise;
+            this.scopeNoiseRules = scopeNoiseRules;
         }
     }
 
     private UpdateInfo prepareUpdateForEditor(Editor editor, Map<String, Change> scopeChangesMap,
-                                              Map<String, Change> localChangesMap) {
+                                              Map<String, Change> localChangesMap,
+                                              List<NoiseRuleState> scopeNoiseRules) {
         if (editor == null || disposing.get()) return null;
 
         Document doc = editor.getDocument();
@@ -252,19 +267,26 @@ public class MyLineStatusTrackerImpl implements Disposable {
             }
         }
 
+        boolean hideNoise = Boolean.TRUE.equals(project.getService(State.class).getHideNoise());
+        NoiseNormalizer normalizer = hideNoise
+                ? project.getService(ChangeNoiseClassifier.class).normalizer()
+                : null;
+
         List<Range> ranges;
         List<Range> scopeRanges = null;
         List<Range> localRanges = null;
         try {
             if (headContent != null) {
-                ranges = computeScopeRangesInCurrentSpace(headContent, normalizedBase, normalizedCurrent, filePath);
-                scopeRanges = RangesBuilder.INSTANCE.createRanges(headContent, normalizedBase);
+                ranges = computeScopeRangesInCurrentSpace(headContent, normalizedBase, normalizedCurrent, filePath, normalizer);
+                scopeRanges = RangesBuilder.INSTANCE.createRanges(headContent, normalizedBase, normalizer, filePath);
                 /* Local changes = current document vs. HEAD, in current-document space. These are the
                  * markers the IDE paints in its own gutter (we exclude them from our scope painting);
-                 * publish them so change navigation can also stop on them. */
+                 * publish them so change navigation can also stop on them. Deliberately not noise
+                 * normalised: the platform paints local markers regardless, so navigation must stop
+                 * on all of them. */
                 localRanges = RangesBuilder.INSTANCE.createRanges(normalizedCurrent, headContent);
             } else {
-                ranges = RangesBuilder.INSTANCE.createRanges(normalizedCurrent, normalizedBase);
+                ranges = RangesBuilder.INSTANCE.createRanges(normalizedCurrent, normalizedBase, normalizer, filePath);
             }
 
             if (LOG.isDebugEnabled()) {
@@ -279,7 +301,8 @@ public class MyLineStatusTrackerImpl implements Disposable {
             ranges = Collections.emptyList();
         }
 
-        return new UpdateInfo(filePath, normalizedBase, headContent, ranges, scopeRanges, localRanges);
+        return new UpdateInfo(filePath, normalizedBase, headContent, ranges, scopeRanges, localRanges,
+                hideNoise, scopeNoiseRules);
     }
 
     private void publishBatchedUpdates(List<UpdateInfo> updates) {
@@ -287,7 +310,7 @@ public class MyLineStatusTrackerImpl implements Disposable {
             if (disposing.get()) break;
             GutterDataService.GutterFileData data = new GutterDataService.GutterFileData(
                     update.precomputedRanges, update.baseContent, update.headContent,
-                    update.scopeRanges, update.localRanges);
+                    update.scopeRanges, update.localRanges, update.hideNoise, update.scopeNoiseRules);
             gutterDataService.publish(update.filePath, data);
             publishedFiles.add(update.filePath);
         }
@@ -296,12 +319,15 @@ public class MyLineStatusTrackerImpl implements Disposable {
     // --- Range computation (unchanged algorithms) ---
 
     private List<Range> computeScopeRangesInCurrentSpace(
-            String headContent, String normalizedBase, String currentContent, String filePath) {
+            String headContent, String normalizedBase, String currentContent, String filePath,
+            NoiseNormalizer normalizer) {
 
-        List<Range> scopeRanges = RangesBuilder.INSTANCE.createRanges(headContent, normalizedBase);
+        List<Range> scopeRanges = RangesBuilder.INSTANCE.createRanges(headContent, normalizedBase, normalizer, filePath);
         LOG.debug("computeScopeRangesInCurrentSpace [" + filePath + "] scope ranges: " + scopeRanges.size());
         if (scopeRanges.isEmpty()) return Collections.emptyList();
 
+        /* Raw comparison: local ranges only map HEAD positions onto the current document, so every
+         * line shift must be present even when the change itself is noise. */
         List<Range> localRanges = RangesBuilder.INSTANCE.createRanges(currentContent, headContent);
         LOG.debug("computeScopeRangesInCurrentSpace [" + filePath + "] local ranges: " + localRanges.size());
         if (localRanges.isEmpty()) return new ArrayList<>(scopeRanges);

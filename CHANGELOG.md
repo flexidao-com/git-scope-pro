@@ -1,3 +1,18 @@
+## [Unreleased]
+
+### Added
+
+- Added a **Hide Noise** toggle to the Git Scope window, hiding files whose only changes are imports or whitespace;
+  file colors and gutter markers still show them, and diffs opened from Git Scope omit those noise-only changes too
+- Added a **Double-click on a file opens its diff instead of the file** setting (off by default); single-click
+  preview is unaffected
+- Added a **Noise rules** section to **Settings → Tools → Git Scope**: define custom noise rules (name, file
+  glob, regex, replacement), import/export them as JSON, and toggle the built-in import rules
+- Added a **Scope Noise Rules…** action to the Git Scope window toolbar: replacement rules, e.g. `onvoice` →
+  `invoice`, that apply only while the current scope is selected, on top of the global noise rules
+- Added **Mark as Reviewed**, **Unmark Reviewed**, and **Clear All Reviewed Marks** actions to the change-browser
+  context menu: a reviewed file stays hidden while **Hide Noise** is on, until its scope diff changes
+
 ## [2026.2.3]
 
 ### Fixes

@@ -31,7 +31,11 @@ public final class Notification {
                               @NotNull String title,
                               @NotNull String message,
                               @NotNull NotificationType type) {
-        ApplicationManager.getApplication().invokeLater(() -> {
+        var application = ApplicationManager.getApplication();
+        if (application == null) {
+            return;
+        }
+        application.invokeLater(() -> {
             if (project != null && project.isDisposed()) {
                 return;
             }

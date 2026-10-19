@@ -6,6 +6,7 @@ import com.intellij.openapi.project.Project;
 import implementation.gutter.Range;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import settings.NoiseRuleState;
 import system.Defs;
 
 import java.util.List;
@@ -41,24 +42,49 @@ public class GutterDataService implements Disposable {
          * (navigation runs on the backend, so the frontend does not need this field).
          */
         public final @Nullable List<Range> localRanges;
+        /**
+         * Whether Hide Noise was on when this data was computed; the frontend uses it to recompute
+         * ranges on edits and to filter the popup diff. Like {@code separateGutterRendering}, it
+         * travels with the data so a toggle takes effect on the next publish.
+         */
+        public final boolean hideNoise;
+        /**
+         * The active tab's scope noise rules, in addition to the global ones. Carried separately
+         * from {@code GitScopeSettings} on purpose: in monolith mode the frontend shares the user's
+         * settings instance, so folding scope rules into it would overwrite the global rules.
+         */
+        public final @NotNull List<NoiseRuleState> scopeNoiseRules;
 
         public GutterFileData(@NotNull List<Range> ranges,
                               @NotNull String baseContent,
                               @Nullable String headContent,
                               @Nullable List<Range> scopeRanges) {
-            this(ranges, baseContent, headContent, scopeRanges, null);
+            this(ranges, baseContent, headContent, scopeRanges, null, false);
         }
 
         public GutterFileData(@NotNull List<Range> ranges,
                               @NotNull String baseContent,
                               @Nullable String headContent,
                               @Nullable List<Range> scopeRanges,
-                              @Nullable List<Range> localRanges) {
+                              @Nullable List<Range> localRanges,
+                              boolean hideNoise) {
+            this(ranges, baseContent, headContent, scopeRanges, localRanges, hideNoise, List.of());
+        }
+
+        public GutterFileData(@NotNull List<Range> ranges,
+                              @NotNull String baseContent,
+                              @Nullable String headContent,
+                              @Nullable List<Range> scopeRanges,
+                              @Nullable List<Range> localRanges,
+                              boolean hideNoise,
+                              @NotNull List<NoiseRuleState> scopeNoiseRules) {
             this.ranges = ranges;
             this.baseContent = baseContent;
             this.headContent = headContent;
             this.scopeRanges = scopeRanges;
             this.localRanges = localRanges;
+            this.hideNoise = hideNoise;
+            this.scopeNoiseRules = scopeNoiseRules;
         }
     }
 
